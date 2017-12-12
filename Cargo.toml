@@ -1,0 +1,12 @@
+[package]
+name = "rhi"
+version = "0.0.2"
+authors = ["lafolle <fghjklp@gmail.com>"]
+
+[dependencies]
+hyper = "0.11"
+hyper-tls = "0.1.2"
+url = "1.5.1"
+futures = "0.1"
+tokio-core = "0.1"
+clap = "2.26.0"

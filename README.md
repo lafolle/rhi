@@ -31,3 +31,9 @@ ARGS:
     <url>    url to hit
 
 ```
+
+## INSTALL
+Install rust: https://www.rust-lang.org/en-US/install.html
+```
+git clone git@github.com:lafolle/rhi.git && cd rhi && cargo build
+```

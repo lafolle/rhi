@@ -48,7 +48,7 @@ use tokio_core::reactor::{Core, Interval};
 use clap::{Arg, App, ArgMatches};
 use core::str::FromStr;
 use std::time::{Duration};
-use std::fmt;
+use std::{fmt, cmp};
 use core::num::ParseIntError;
 
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -144,13 +144,21 @@ fn main() {
     let core_handle = core.handle();
     let client = Client::new(&core_handle);
 
+    let mut sentr = 0;
     let ticks = Interval::new(Duration::new(1, 0), &core_handle).unwrap();
     let ticks_future = ticks.for_each( move |_| {
 
-        // Send creq requests to server per second.
-        let mut c = 0;
-        while c < opts.creq {
-            c += 1;
+        if sentr >= opts.nreq {
+            println!("DONE");
+            // TODO: stop the reactor.
+        }
+
+        let mut i = 0;
+        let n = cmp::min(opts.creq, opts.nreq-sentr);
+        while  i < n {
+
+            i += 1;
+
             let req = opts.get_request();
             let post = client.request(req).and_then(|res| {
                 println!("response: {}", res.status());
@@ -158,10 +166,12 @@ fn main() {
             }).then(|_| Ok(()) );
             core_handle.spawn(post);
         }
+        sentr += n;
 
         Ok(())
 
     });
+
     core.run(ticks_future).unwrap();
 }
 

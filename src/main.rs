@@ -45,7 +45,7 @@ use futures::{Future,Stream};
 use hyper::{Method, Request, Client, Uri};
 use hyper::header::{ContentLength, Accept, QualityItem, Authorization, Basic};
 use tokio_core::reactor::{Core, Interval};
-use clap::{Arg, App};
+use clap::{Arg, App, ArgMatches};
 use core::str::FromStr;
 use std::time::{Duration};
 use std::fmt;
@@ -56,7 +56,10 @@ const DEFAULT_NREQ: u32 = 100;
 const DEFAULT_CREQ: u32 = 10;
 const DEFAULT_RPS: u32 = 10;
 
-struct Options {
+/*
+Lifetime of aninstance of Options should not exceed lifetime of ArgMatches.
+*/
+struct Options<'a>{
 
     // #requests to run. DEFAULT_NREQ.
     nreq: u32, 
@@ -68,10 +71,64 @@ struct Options {
     // timeout per request.
     timeout: Duration, 
 
-    req: Request,
+    matches: ArgMatches<'a>,
 }
 
-impl fmt::Display for Options {
+impl<'a> Options<'a>{
+    
+    fn get_request(&self) -> Request {
+        let uri = match self.matches.value_of("url") {
+            Some(x) => x,
+            None => panic!("url is required by rhi."),
+        };
+        let uri = Uri::from_str(uri).unwrap();
+
+        let method = match self.matches.value_of("method") {
+            Some("GET") => Method::Get,
+            Some("POST") => Method::Post,
+            Some("PUT") => Method::Put,
+            Some("DELETE") => Method::Delete,
+            Some("HEAD") => Method::Head,
+            Some("OPTIONS") => Method::Options,
+            _  => Method::Get
+        };
+
+        let mut req = Request::new(method, uri);
+
+        // Accept header.
+        if self.matches.is_present("accept_header") {
+            let qi = QualityItem::from_str(self.matches.value_of("accept_header").unwrap()).unwrap();
+            req.headers_mut().set(Accept(vec![qi]));
+        }
+
+        // Basic authorization.
+        if self.matches.is_present("a") {
+            let v: Vec<&str> = self.matches.value_of("a").unwrap().split(':').collect();
+            assert_eq!(v.len(), 2);
+            let username = v[0];
+            let password = v[1];
+            req.headers_mut().set(Authorization(
+                Basic {
+                    username: username.to_owned(),
+                    password: Some(password.to_owned()),
+                }
+            ))
+        }
+
+        // Body.
+        if self.matches.is_present("d") {
+            let body = self.matches.value_of("d").unwrap().to_owned();
+            let blen = body.len();
+            req.set_body(body);
+            req.headers_mut().set(ContentLength(blen as u64));
+        }
+
+        req
+    }
+
+}
+
+impl<'a> fmt::Display for Options<'a> {
 
     fn fmt(&self, f: &mut  fmt::Formatter) -> fmt::Result {
         write!(f, "(nreq:{} creq:{} rps:{})", self.nreq, self.creq, self.rps)
@@ -81,8 +138,36 @@ impl fmt::Display for Options {
 
 fn main() {
 
-    let app = App::new("rhi")
-                    .version(VERSION)
+    let opts = get_options().unwrap();
+
+    let mut core = Core::new().unwrap();
+    let core_handle = core.handle();
+    let client = Client::new(&core_handle);
+
+    let ticks = Interval::new(Duration::new(1, 0), &core_handle).unwrap();
+    let ticks_future = ticks.for_each( move |_| {
+
+        // Send creq requests to server per second.
+        let mut c = 0;
+        while c < opts.creq {
+            c += 1;
+            let req = opts.get_request();
+            let post = client.request(req).and_then(|res| {
+                println!("response: {}", res.status());
+                res.body().concat2()
+            }).then(|_| Ok(()) );
+            core_handle.spawn(post);
+        }
+
+        Ok(())
+
+    });
+    core.run(ticks_future).unwrap();
+}
+
+fn get_options<'a>() -> Result<Options<'a>, ParseIntError> {
+
+    let app = App::new("rhi").version(VERSION)
                     .about("HTTP load generator (like hey by @rakyll)")
                     .author("lafolle")
                     .arg(Arg::with_name("n")
@@ -136,34 +221,6 @@ be smaller than the concurrency level."))
                         .required(true)
                         .index(1));
 
-
-    let opts = get_options(app).unwrap();
-
-    println!("opts {}", opts);
-
-    // Make request.
-    let mut core = Core::new().unwrap();
-    let core_handle = core.handle();
-    let client = Client::new(&core_handle);
-
-    let ticks = Interval::new(Duration::new(1, 0), &core_handle).unwrap();
-    let ticks_future = ticks.for_each( move |_| {
-
-        let post = client.request(opts.req).and_then(|res| {
-            println!("response: {}", res.status());
-            res.body().concat2()
-        }).then(|_| Ok(()) );
-
-        core_handle.spawn(post);
-
-        Ok(())
-
-    });
-    core.run(ticks_future).unwrap();
-}
-
-fn get_options(app: App) -> Result<Options, ParseIntError/*&'static str*/> {
-
     let matches = app.get_matches();
 
     let nreq = match matches.value_of("n") {
@@ -179,71 +236,12 @@ fn get_options(app: App) -> Result<Options, ParseIntError/*&'static str*/> {
         None => DEFAULT_RPS,
     };
 
-    let uri = match matches.value_of("url") {
-        Some(x) => x,
-        None => panic!("url is required by rhi."),
-    };
-
-    let uri = Uri::from_str(uri).unwrap();
-
-    let method = match matches.value_of("method") {
-        Some("GET") => Method::Get,
-        Some("POST") => Method::Post,
-        Some("PUT") => Method::Put,
-        Some("DELETE") => Method::Delete,
-        Some("HEAD") => Method::Head,
-        Some("OPTIONS") => Method::Options,
-        _  => Method::Get
-    };
-
-    let mut req = Request::new(method, uri);
-
-    // Accept header.
-    if matches.is_present("accept_header") {
-        let qi = QualityItem::from_str(matches.value_of("accept_header").unwrap()).unwrap();
-        req.headers_mut().set(Accept(vec![qi]));
-    }
-
-    // Basic authorization.
-    if matches.is_present("a") {
-        let v: Vec<&str> = matches.value_of("a").unwrap().split(':').collect();
-        assert_eq!(v.len(), 2);
-        let username = v[0];
-        let password = v[1];
-        req.headers_mut().set(Authorization(
-            Basic {
-                username: username.to_owned(),
-                password: Some(password.to_owned()),
-            }
-        ))
-    }
-
-    // Body.
-    if matches.is_present("d") {
-        let body = matches.value_of("d").unwrap().to_owned();
-        let blen = body.len();
-        req.set_body(body);
-        req.headers_mut().set(ContentLength(blen as u64));
-    }
-
-    /*
-    // Content-type.
-    TODO: use mime crate or not???
-    let ct: Mime  = match matches.value_of("T") {
-        Some(t) => t.parse().unwrap(),
-        None => DEFAULT_CONTENT_TYPE
-    };
-    req.headers_mut().set(ct);
-    */
-
     let options = Options{
         nreq: nreq,
         creq: creq,
         rps: rps,
-
         timeout: Duration::new(10,0),
-
-        req: req,
+        matches: matches,
     };
 
     Ok(options)

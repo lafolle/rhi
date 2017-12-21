@@ -32,7 +32,7 @@
     -more                 Provides information on DNS lookup, dialup, request and response timings.
 */
 
-
+#[macro_use]
 extern crate futures;
 extern crate hyper;
 extern crate hyper_tls;
@@ -41,13 +41,13 @@ extern crate clap;
 extern crate url;
 extern crate core;
 
-use futures::{Future,Stream};
+use futures::{Future, Stream, Poll, Async};
 use hyper::{Method, Request, Client, Uri};
 use hyper::header::{ContentLength, Accept, QualityItem, Authorization, Basic};
 use tokio_core::reactor::{Core, Interval};
 use clap::{Arg, App, ArgMatches};
 use core::str::FromStr;
-use std::time::{Duration};
+use std::time::{Duration, SystemTime};
 use std::{fmt, cmp};
 use core::num::ParseIntError;
 
@@ -136,6 +136,53 @@ impl<'a> fmt::Display for Options<'a> {
     
 }
 
+struct RhiRequest {
+    id: u32,
+    req: Request,
+    stat: RequestStat,
+}
+
+struct RequestStat {
+    expected_sent: SystemTime,
+    actual_sent: SystemTime,
+    completed: SystemTime,
+}
+
+// RequestStream represents a stream of requests.
+struct RequestStream {
+    ticker: Interval,
+    max_requests: u32,
+    sent_req: u32
+}
+
+impl Stream for RequestStream {
+    type Item = RhiRequest;
+    type Error = <Interval as Stream>::Error;
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        match try_ready!(self.ticker.poll()) {
+            Some(_) => {
+                if self.sent_req < self.max_requests {
+                    let req = RhiRequest{
+                        id: self.sent_req,
+                        req: Request::new(hyper::Get, Uri::from_str("http://localhost:7000").unwrap()),
+                        stat: RequestStat{
+                            expected_sent: SystemTime::now(),
+                            actual_sent: SystemTime::now(),
+                            completed: SystemTime::now(),
+                        },
+                    };
+                    self.sent_req += 1;
+                    Ok(Async::Ready(Some(req)))
+                } else {
+                    Ok(Async::Ready(None))
+                }
+            },
+            _ => unimplemented!(),
+        }
+    }
+}
+
 fn main() {
 
     let opts = get_options().unwrap();
@@ -144,35 +191,40 @@ fn main() {
     let core_handle = core.handle();
     let client = Client::new(&core_handle);
 
-    let mut sentr = 0;
-    let ticks = Interval::new(Duration::new(1, 0), &core_handle).unwrap();
-    let ticks_future = ticks.for_each( move |_| {
+    let rs = RequestStream {
+        ticker: Interval::new(Duration::from_millis(1000), &core_handle).unwrap(),
+        max_requests: opts.nreq,
+        sent_req: 0,
+    };
 
-        if sentr >= opts.nreq {
-            println!("DONE");
-            // TODO: stop the reactor.
-        }
+    let fut = rs.for_each(|rreq| {
+        println!("send req [{}]: {}", rreq.id, rreq.req.uri());
+        let post = client.request(rreq.req).and_then(|res| {
+            println!("response: {}", res.status());
+            res.body().concat2()
+        }).then(|res| {
+            println!("reading body");
+            match res {
+                Ok(chunk) => {
+                    println!("chunk: {}", chunk.len());
+                    Ok(()) 
+                },
+                Err(_) => unimplemented!(),
+            }
+        });
 
-        let mut i = 0;
-        let n = cmp::min(opts.creq, opts.nreq-sentr);
-        while  i < n {
-
-            i += 1;
-
-            let req = opts.get_request();
-            let post = client.request(req).and_then(|res| {
-                println!("response: {}", res.status());
-                res.body().concat2()
-            }).then(|_| Ok(()) );
-            core_handle.spawn(post);
-        }
-        sentr += n;
+        core_handle.spawn(post);
 
         Ok(())
 
     });
 
-    core.run(ticks_future).unwrap();
+    match core.run(fut) {
+        Ok(_) => unimplemented!(),
+        Err(e) => {
+            println!("{}", e);
+        }
+    };
 }
 
 fn get_options<'a>() -> Result<Options<'a>, ParseIntError> {

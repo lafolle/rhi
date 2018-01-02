@@ -1,4 +1,4 @@
-# rhi
+# rhi (WIP)
 ```
 rhi 0.0.2
 lafolle
